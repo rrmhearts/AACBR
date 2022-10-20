@@ -13,6 +13,7 @@ from functools import cmp_to_key
 from operator import lt
 from collections import deque, defaultdict
 from warnings import warn
+from logging import debug, info, warning, error
 
 from .argumentation import compute_grounded
 from .cases import Case, different_outcomes
@@ -49,18 +50,19 @@ class Aacbr:
   #   return self._attacked[case]
   
   def fit(self, casebase=set(), outcomes=None, remove_spikes=False):
-    if all((type(x)==Case for x in casebase)):
+    if all((type(x) == Case for x in casebase)):
       cb_input = tuple(casebase)
     elif outcomes is not None:
       if len(outcomes) != len(casebase):
-        raise(RuntimeError("Length of casebase argument is nto the same as outcomes!"))
+        raise(RuntimeError("Length of casebase argument is not the same as outcomes!"))
       else:
         cb_input = [Case(str(i), x, y)
                     for (i,(x,y)) in enumerate(zip(casebase, outcomes))]
-    
+
+    # unnecessary since it is now a method of the class
     if not isinstance(self, Aacbr):
       raise(Exception(f"{self} is not an instance of {Aacbr}"))
-    
+
     self.casebase_initial = cb_input
     self.infer_default(cb_input)
     if self.default_case not in cb_input:
@@ -86,7 +88,8 @@ class Aacbr:
       # raise(Exception("Cautious case not implemented"))
     return self
   
-  def infer_default(self, casebase):    
+  def infer_default(self, casebase):
+    info("Inferring default")
     default_in_input = self.default_in_casebase(casebase)
     if default_in_input:
       self.default_case = default_in_input
@@ -98,7 +101,7 @@ class Aacbr:
       if self.casebase_active:
         self.casebase_active += [self.default_case]
       
-    elif all([type(case.factors) == set for case in casebase]):
+    elif all([type(case.factors) == frozenset for case in casebase]):
       self.default_case = Case("default", set(), outcome=self.outcome_def)
       if self.casebase_active:
         self.casebase_active += [self.default_case]
@@ -125,7 +128,7 @@ class Aacbr:
       self.attacked_by[case] = []
   
   # not something in the set of all possible cases in the middle
-  def most_concise(self, cases, A, B):
+  def minimal(self, A, B, cases):
     return not any((B < case and
                     case < A and
                     not (different_outcomes(A, case)))
@@ -133,12 +136,21 @@ class Aacbr:
 
   # attack relation defined
   def past_case_attacks(self, A, B):
-    if not all(x in self.casebase_active for x in (A,B)):
-      raise(Exception(f"Arguments {(A,B)} are not both in the active casebase."))
+    """Checks whether A should attack B by the past case rule.
+    It assumes A and B are in the active casebase."""
+    SAFETY_CHECK = False    
+    # for performance, set SAFETY_CHECK to False
+    # for safety, to True
+    # if True, checks whether both cases are actually in the
+    # casebase_active. Since this adds a big cost on performance, we
+    # deactivated this check by default.
+    if SAFETY_CHECK:
+      if not all(x in self.casebase_active for x in (A,B)):
+        raise(Exception(f"Arguments {(A,B)} are not both in the active casebase."))
     
     return (different_outcomes(A, B) and
             B <= A and
-            self.most_concise(self.casebase_active, A, B))
+            self.minimal(A, B, self.casebase_active))
 
   # unlabbled datapoint new_case
   @staticmethod
@@ -160,13 +172,12 @@ class Aacbr:
   
   # predictions for multiple points
   def give_predictions(self, new_cases, nr_defaults=1):
-    casebase = self.casebase_active
+    # casebase = self.casebase_active
     # new_cases = self.give_new_cases(casebase, new_cases)
     predictions = []
     for new_case in new_cases:
       new_case_prediction = dict()
-      number = new_cases.index(new_case)
-      prediction = self.give_prediction(new_case, nr_defaults, number)
+      prediction = self.give_prediction(new_case, nr_defaults)
       predictions.append(prediction)
     formatted = self.format_predictions(new_cases, predictions)
     # return dialectical_box, predictions
@@ -181,7 +192,7 @@ class Aacbr:
                  in enumerate(zip(new_cases, predictions))]
   
   
-  def give_prediction(self, new_case, nr_defaults: int = 1, number: int = 0):
+  def give_prediction(self, new_case, nr_defaults: int = 1):
     '''Returns an AA-CBR prediction given a casebase and a new case'''
     grounded = self.grounded_extension(new_case, output_type="labelling")
     def_arg = self.default_case
@@ -242,6 +253,7 @@ class Aacbr:
   def give_cautious_subset_of_casebase(self, casebase):
     self.reset_attack_relations(casebase) # gpp
     ordered_casebase = self.topological_sort(casebase)
+    info("Creating cautious casebase")
     # print(ordered_casebase)
     self.reset_attack_relations(ordered_casebase)
     
@@ -312,6 +324,7 @@ class Aacbr:
   def give_casebase(self, cases):
     """Computes and stores the attack relation.
     """
+    info("Preparing attack relations in the casebase")
     self.reset_attack_relations(cases)
     casebase = []
     for candidate_case in cases:
@@ -335,6 +348,7 @@ class Aacbr:
   def give_casebase_without_spikes(self, cases):
     """Gives casebase without "spikes", that is, without nodes that do not reach the default argument.
     This makes the comparison between cAACBR and AACBR much cleaner."""
+    info("Preparing attack relations in the casebase (without spikes)")
     casebase = self.give_casebase(cases)
     aaf = self.give_argumentation_framework()
     # print(set(cases).difference(set(mapping.keys())))
@@ -363,8 +377,10 @@ class Aacbr:
     return clean_casebase
 
   def topological_sort(self, casebase):
+    info("Topological sorting")
     order_dag = self.build_order_dag(casebase, lt)
     output = self.topological_sort_graph(*order_dag)
+    info("Topological sorting: done.")
     return output
 
   def build_order_dag(self, nodes, compare):
@@ -421,12 +437,16 @@ class Aacbr:
     return sorted_nodes
 
   def draw_graph(self, new_case=None, graph_name="graph", output_dir=None):
-    sink = self.default_case
     arguments, attacks = self.give_argumentation_framework(new_case)
     graph = giveGraph(arguments, attacks)
-    path = getPath(graph, [sink])
-    directed_path = giveGraph(path)
-    drawGraph(directed_path, graph_name, output_dir)
+    # strange, with commented out code below this draws a path from an
+    # arbitrary leaf to the default
+    # unclear why this was the implementation
+    # sink = self.default_case
+    # path = getPath(graph, [sink])
+    # directed_path = giveGraph(path)
+    # drawGraph(directed_path, graph_name, output_dir)
+    drawGraph(graph, graph_name, output_dir)
     pass  
   
   def give_coherent_dataset(self, cases):
